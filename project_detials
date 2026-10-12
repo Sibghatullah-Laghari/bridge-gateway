@@ -1,0 +1,481 @@
+# GateForge — API Gateway Engineering Specification
+
+> A lightweight, learning-focused API Gateway demonstrating backend infrastructure, security, concurrency, reliability, and system design using Java and Spring Boot.
+
+## 1. Project Overview
+
+**Repository:** `gateforge-api-gateway`
+
+**Goal:** Build a small but professionally engineered API Gateway that acts as a single entry point for multiple backend services.
+
+The primary focus is infrastructure engineering, not business features. The project must remain easy to understand while demonstrating intermediate-to-advanced software engineering principles.
+
+### Core Responsibilities
+
+- Route HTTP requests to configured backend services.
+- Authenticate requests using JWT.
+- Enforce authorization policies.
+- Apply distributed rate limiting using Redis.
+- Control upstream concurrency and failures.
+- Provide structured logging, request tracing, and metrics.
+- Support multiple gateway instances.
+- Test concurrent traffic and failure scenarios.
+
+## 2. Technology Stack
+
+- Java 21
+- Spring Boot 3.x
+- Compatible Spring Cloud Gateway release
+- Spring Security OAuth2 Resource Server
+- Redis
+- Resilience4j
+- Spring Boot Actuator and Micrometer
+- Maven
+- JUnit 5 and Mockito
+- Testcontainers
+- Docker and Docker Compose
+- GitHub Actions
+- k6 for load testing
+
+Use compatible, stable dependency versions. Follow the official Spring Boot and Spring Cloud compatibility guidance.
+
+Do not add technologies without a clear engineering reason.
+
+## 3. Architecture
+
+```text
+                    Clients
+                       |
+                       v
+              +------------------+
+              |   Load Balancer  |
+              +------------------+
+                       |
+                +------+------+
+                |             |
+                v             v
+          +-----------+ +-----------+
+          | Gateway 1 | | Gateway 2 |
+          +-----------+ +-----------+
+                |             |
+                +------+------+
+                       |
+          +------------+------------+
+          |            |            |
+          v            v            v
+       Product      Order        Other
+       Service      Service      Services
+
+          Gateway instances share:
+          - Redis rate-limit state
+          - Centralized configuration
+          - Consistent security policies
+```
+
+The initial version may run one gateway instance. Add the load balancer and second instance during the scalability milestone.
+
+### Architectural Principles
+
+- Start with one gateway application.
+- Keep mock upstream services minimal.
+- Keep business logic outside the gateway.
+- Use framework-supported routing and proxying.
+- Keep rate-limit state shared across instances.
+- Avoid critical state stored only in local memory.
+- Make failure behavior explicit and testable.
+- Prefer simple, well-tested designs over unnecessary abstractions.
+
+## 4. Functional Requirements
+
+### 4.1 Request Routing
+
+- Route requests using configured paths and HTTP methods.
+- Support path rewriting.
+- Preserve necessary query parameters and headers.
+- Return consistent errors for unmatched routes.
+- Handle upstream failures safely.
+- Support multiple configurable upstream services.
+
+Never accept arbitrary destination URLs from clients. Prevent open-proxy and SSRF vulnerabilities by using trusted route configuration and appropriate destination restrictions.
+
+### 4.2 JWT Authentication
+
+- Support public and protected routes.
+- Validate JWT signatures using trusted keys.
+- Validate token expiration and issuer.
+- Validate audience when required by the security configuration.
+- Reject malformed, expired, or invalid tokens.
+- Never log tokens, passwords, or signing secrets.
+
+Use Spring Security OAuth2 Resource Server. Do not implement JWT cryptographic verification manually.
+
+### 4.3 Authorization
+
+- Support role- or scope-based access policies.
+- Require appropriate permissions for protected routes.
+- Return HTTP 401 for missing or invalid authentication.
+- Return HTTP 403 when an authenticated client lacks permission.
+
+Do not trust caller-supplied identity headers.
+
+### 4.4 Distributed Rate Limiting
+
+Implement a Token Bucket algorithm.
+
+Requirements:
+
+- Configurable bucket capacity.
+- Configurable refill rate.
+- Per-user rate limits for authenticated clients.
+- Per-IP limits for selected public routes.
+- Route-specific rate-limit policies.
+- HTTP 429 responses when limits are exceeded.
+- Useful `Retry-After` information when it can be calculated reliably.
+- Shared quota enforcement across gateway instances.
+- Atomic token refill and consumption in Redis.
+- Configurable behavior when Redis is unavailable.
+
+Use an atomic Redis-side operation, such as a Lua script, to prevent concurrent requests from consuming the same available token.
+
+Do not rely on independent in-memory counters for distributed quotas.
+
+Document the trade-off between fail-open and fail-closed behavior. Use fail-closed behavior for protected, expensive routes in the initial implementation.
+
+### 4.5 Upstream Resilience
+
+Implement:
+
+- Connection and response timeouts.
+- Bounded concurrent requests per upstream.
+- Circuit breakers.
+- Controlled error responses.
+- Graceful shutdown.
+- Recovery testing.
+
+Use Resilience4j where appropriate.
+
+Avoid automatic retries for non-idempotent requests because retries may duplicate business operations.
+
+### 4.6 Observability
+
+Implement:
+
+- Request/correlation IDs.
+- Structured logs.
+- Request count metrics.
+- Request duration metrics.
+- Response status metrics.
+- Rate-limit rejection counters.
+- Upstream failure counters.
+- Circuit-breaker state visibility.
+- Gateway and dependency health checks.
+
+Use Spring Boot Actuator and Micrometer.
+
+Keep management endpoints protected and do not expose sensitive diagnostic information publicly.
+
+## 5. Request Processing Flow
+
+A request should pass through the appropriate security and traffic-control policies before reaching an upstream service.
+
+1. Receive the request.
+2. Generate or validate a request ID.
+3. Match a configured route.
+4. Authenticate when required.
+5. Authorize the requested operation.
+6. Apply rate limiting.
+7. Apply upstream concurrency and resilience policies.
+8. Forward the request.
+9. Record the response status and duration.
+
+Configure and test the actual filter execution order. Security controls must not be bypassed by alternative routes or unexpected filter ordering.
+
+## 6. API Design
+
+### Example Routes
+
+| Method | Path | Purpose |
+|---|---|---|
+| GET | `/api/public/info` | Public route |
+| GET | `/api/products/**` | Product service |
+| GET | `/api/orders/**` | Protected order service |
+| POST | `/api/orders/**` | Protected order service |
+| GET | `/actuator/health` | Gateway health |
+| GET | `/actuator/metrics` | Local metrics inspection |
+
+The business endpoints are forwarded to mock services. Do not create unnecessary gateway controllers for every upstream endpoint.
+
+Management endpoints must not be publicly exposed without appropriate security.
+
+### Standard Error Responses
+
+Use a consistent JSON error format containing:
+
+- Timestamp
+- HTTP status
+- Stable error code
+- Safe error message
+- Request ID
+
+Never return stack traces, credentials, internal secrets, or sensitive infrastructure details.
+
+Use appropriate HTTP status codes, including 400, 401, 403, 404, 429, 502, 503, and 504.
+
+## 7. Engineering and Concurrency Requirements
+
+Assume multiple requests may arrive simultaneously and multiple gateway instances may run concurrently.
+
+The implementation must:
+
+- Avoid unsafe shared mutable state.
+- Avoid blocking operations on WebFlux event-loop threads.
+- Use appropriate non-blocking integrations.
+- Bound concurrent upstream requests.
+- Handle simultaneous Redis rate-limit decisions atomically.
+- Use timeouts to prevent indefinite resource consumption.
+- Limit request-body sizes where applicable.
+- Avoid unbounded queues and uncontrolled retries.
+- Handle cancellation and client disconnection appropriately.
+
+Do not introduce synchronization or concurrency primitives without a clear need.
+
+Explain important concurrency decisions in documentation.
+
+## 8. Failure Scenarios
+
+The system must be tested against the following scenarios.
+
+| Scenario | Expected Behavior |
+|---|---|
+| Missing JWT | HTTP 401 on protected routes |
+| Invalid JWT | HTTP 401 |
+| Insufficient scope | HTTP 403 |
+| Rate limit exceeded | HTTP 429 |
+| Redis unavailable | Apply documented failure policy |
+| Upstream unavailable | Controlled HTTP 502/503 |
+| Upstream timeout | Controlled HTTP 504 |
+| Unknown route | HTTP 404 |
+| Concurrent quota consumption | No excess tokens granted through races |
+| Two gateway instances | Shared rate-limit enforcement |
+| Slow upstream | Bounded resource consumption |
+| Repeated upstream failures | Circuit breaker opens |
+| Upstream recovers | Circuit breaker can recover |
+| Gateway restart | No dependency on local rate-limit state |
+| Arbitrary destination supplied | Request cannot create an unrestricted proxy |
+
+## 9. Testing Strategy
+
+Use JUnit 5 for unit tests and Testcontainers for integration tests where appropriate.
+
+### Unit Tests
+
+Test:
+
+- Route policy decisions.
+- Token-bucket calculations.
+- Error response formatting.
+- Configuration validation.
+- Security policy behavior.
+
+### Integration Tests
+
+Test:
+
+- Successful routing.
+- JWT authentication and authorization.
+- Redis-backed rate limiting.
+- Concurrent rate-limit requests.
+- Redis unavailability.
+- Upstream timeouts.
+- Circuit-breaker behavior.
+- Shared quota across gateway instances.
+- Management endpoint protection.
+
+Use mock upstreams or controlled test servers.
+
+Tests must be repeatable and must not depend on external production services.
+
+Prioritize important behavior and failure cases rather than artificial 100% code coverage.
+
+## 10. Performance Testing
+
+Use k6 to benchmark the gateway.
+
+Measure:
+
+- Requests per second.
+- Successful requests per second.
+- p50 latency.
+- p95 latency.
+- p99 latency.
+- Error rate.
+- Rate-limit rejection rate.
+- Upstream timeout rate.
+- Resource consumption where available.
+
+Compare:
+
+1. Direct requests to a mock upstream.
+2. Requests through one gateway instance.
+3. Requests through the gateway with JWT and Redis rate limiting enabled.
+4. Requests through two gateway instances sharing Redis.
+
+Keep test conditions consistent.
+
+Document hardware, workload, duration, configuration, results, and limitations.
+
+Never claim performance improvements without measurements.
+
+## 11. Repository Structure
+
+```text
+gateforge-api-gateway/
+├── src/
+│   ├── main/
+│   │   ├── java/com/gateforge/
+│   │   │   ├── config/
+│   │   │   ├── routing/
+│   │   │   ├── security/
+│   │   │   ├── ratelimit/
+│   │   │   ├── resilience/
+│   │   │   ├── observability/
+│   │   │   └── error/
+│   │   └── resources/
+│   │       └── application.yml
+│   └── test/
+├── mock-services/
+│   ├── product-service/
+│   └── order-service/
+├── load-tests/
+│   └── gateway-load-test.js
+├── docs/
+│   ├── architecture.md
+│   ├── security-model.md
+│   ├── failure-scenarios.md
+│   ├── design-decisions.md
+│   └── benchmarking.md
+├── .github/
+│   └── workflows/
+│       └── ci.yml
+├── docker-compose.yml
+├── .env.example
+├── .gitignore
+├── pom.xml
+├── PROJECT_SPEC.md
+└── README.md
+```
+
+Adapt the structure when necessary. Do not create empty packages or unnecessary modules just to match this tree.
+
+## 12. Development Milestones
+
+### Milestone 1 — Routing MVP
+
+Create the gateway and two minimal mock upstream services.
+
+Implement routing, path rewriting, and controlled upstream errors.
+
+### Milestone 2 — JWT Security
+
+Implement public/protected routes, token validation, and scope-based authorization.
+
+### Milestone 3 — Redis Rate Limiting
+
+Implement an atomic Token Bucket, route-specific policies, HTTP 429 responses, and a documented Redis failure policy.
+
+### Milestone 4 — Resilience
+
+Add timeouts, bounded concurrency, circuit breakers, and graceful shutdown.
+
+### Milestone 5 — Observability and Testing
+
+Add request IDs, structured logs, metrics, health checks, and integration tests.
+
+### Milestone 6 — Scalability and Release
+
+Run two gateway instances, verify shared quotas, benchmark the system, configure CI, and complete documentation.
+
+Do not implement all milestones simultaneously.
+
+## 13. Architecture Decision Records
+
+Document important decisions, including:
+
+- Why Spring Cloud Gateway is used instead of a custom HTTP proxy.
+- Why WebFlux is appropriate for this gateway.
+- Why Redis stores shared rate-limit state.
+- Why the Token Bucket algorithm was selected.
+- Why JWT validation uses Spring Security.
+- Why fail-closed behavior is selected for protected routes.
+- How circuit-breaker and bulkhead limits are configured.
+- What the system does not guarantee.
+
+Each decision should explain the context, alternatives, chosen approach, and trade-offs.
+
+## 14. Code Quality Rules
+
+- Prefer readable code over clever code.
+- Follow SOLID principles where they improve maintainability.
+- Keep classes focused and reasonably small.
+- Separate configuration, routing policies, security, rate limiting, resilience, and observability.
+- Validate configuration at startup.
+- Use dependency injection.
+- Avoid duplicated logic and magic numbers.
+- Do not introduce unnecessary interfaces or design patterns.
+- Never hardcode secrets.
+- Do not commit local IDE files, credentials, generated build output, or environment files containing secrets.
+- Explain non-obvious design decisions.
+- Run tests after each meaningful change.
+
+## 15. Coding Agent Workflow
+
+Act as my engineering partner and tutor.
+
+Before writing code:
+
+1. Inspect the existing repository.
+2. Identify the current implementation and missing features.
+3. Present a short plan for the next milestone.
+4. Explain important design decisions and trade-offs.
+
+Then implement only the current milestone.
+
+After implementation:
+
+1. Run the relevant tests.
+2. Report the actual test results.
+3. Summarize changed files.
+4. Explain the implemented logic briefly.
+5. Identify limitations and the next step.
+
+Do not claim tests passed if they were not executed.
+
+Do not rewrite unrelated code or introduce unnecessary dependencies.
+
+Do not advance to the next milestone until I approve.
+
+Keep explanations concise and focus on why the engineering decisions matter.
+
+## 16. Definition of Done
+
+The project is ready for portfolio presentation when:
+
+- Routing works reliably.
+- JWT authentication and authorization are tested.
+- Redis rate limiting works across two gateway instances.
+- Concurrent requests cannot bypass the configured quota through race conditions.
+- Upstream failures are handled predictably.
+- Circuit breakers and concurrency limits are tested.
+- Metrics and request IDs support troubleshooting.
+- Docker Compose starts the local environment.
+- Automated tests pass.
+- CI builds and tests the repository.
+- Benchmarks contain reproducible, measured results.
+- README and architecture documentation explain the design.
+- Known limitations and security boundaries are documented.
+
+## Final Objective
+
+Build a small, understandable API Gateway that demonstrates real software engineering skills: security, concurrency, distributed state, fault tolerance, system design, testing, observability, and performance measurement.
+
+The goal is not to imitate an enterprise platform by adding unnecessary technologies. The goal is to understand, implement, test, and explain every major design decision confidently in a 2027 software engineering interview.
