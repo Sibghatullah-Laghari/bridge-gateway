@@ -1,3 +1,3 @@
-# bridge-gateway.
+# bridge-gateway
 .
 .
